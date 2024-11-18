@@ -9,8 +9,6 @@ import (
 )
 
 func main() {
-	fmt.Println("Starting P2P Messenger")
-
 	// Create messengers
 	messenger1 := NewP2PMessenger("Adam", "1235")
 	messenger2 := NewP2PMessenger("Eve", "1236")

@@ -121,7 +121,7 @@ func (p *P2PMessenger) handleIncomingConnection(conn net.Conn) {
 
 	// Try to decode as DHT request first
 	var dhtRequest DHTRequest
-	if err := json.Unmarshal(data, &dhtRequest); err == nil && dhtRequest.Type == "GET_DHT" {
+	if err := json.Unmarshal(data, &dhtRequest); err == nil && dhtRequest.Type == REQUEST_GET || dhtRequest.Type == REQUEST_STORE || dhtRequest.Type == REQUEST_GET_DHT {
 		p.handleDHTRequest(conn)
 		return
 	}
@@ -140,8 +140,7 @@ func (p *P2PMessenger) handleDHTRequest(conn net.Conn) {
 	log.Printf("[%s] Handling DHT request", p.userID)
 
 	response := DHTResponse{
-		RoutingTable: p.dht.routingTable,
-		DataStore:    p.dht.dataStore,
+		DataStore: p.dht.dataStore,
 	}
 
 	if err := json.NewEncoder(conn).Encode(response); err != nil {
