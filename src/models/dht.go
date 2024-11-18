@@ -2,103 +2,252 @@ package models
 
 import (
 	"bufio"
-	"crypto/sha1"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/sha3"
 )
 
+// Node represents a node in the DHT
 type Node struct {
 	ID      []byte
 	Address string
 }
 
+// DHTNode represents a node in the DHT
 type DHTNode struct {
-	node         Node
-	routingTable map[string]Node
-	dataStore    map[string]string
-	mutex        sync.RWMutex
+	node      Node
+	kBuckets  [KEY_SIZE]*KBucket
+	dataStore map[string]string
+	mutex     sync.RWMutex
 }
 
+// DHTRequest is a request to the DHT
 type DHTRequest struct {
 	Type    string
 	Payload interface{}
 }
 
+// DHTResponse is the response to a DHT request
 type DHTResponse struct {
-	RoutingTable map[string]Node
-	DataStore    map[string]string
+	Nodes     []Node
+	DataStore map[string]string
 }
 
+// NewDHTNode creates a new DHT node with the given address
 func NewDHTNode(address string) *DHTNode {
-	id := sha1.Sum([]byte(address))
+	id := sha3.Sum256([]byte(address))
+
 	dht := &DHTNode{
 		node: Node{
 			ID:      id[:],
 			Address: address,
 		},
-		routingTable: make(map[string]Node),
-		dataStore:    make(map[string]string),
+		dataStore: make(map[string]string),
+	}
+
+	// Initialize k-buckets
+	for i := 0; i < KEY_SIZE; i++ {
+		dht.kBuckets[i] = &KBucket{
+			Nodes: make([]Node, 0, K_BUCKET_SIZE),
+		}
 	}
 
 	err := dht.loadPeersFromConfig()
-
 	if err != nil {
 		log.Println("Warning: failed to load peers from configuration file")
 	}
 	return dht
 }
 
-func (dht *DHTNode) Bootstrap() error {
-	log.Printf("[%s] Starting bootstrap", dht.node.Address)
+// getBucketIndex determines which k-bucket a node belongs in
+func (dht *DHTNode) getBucketIndex(nodeId []byte) int {
+	return CommonPrefixLength(dht.node.ID, nodeId)
+}
 
+// addToKBucket adds a node to the appropriate k-bucket
+func (dht *DHTNode) addToKBucket(node Node) {
+	if bytes.Equal(node.ID, dht.node.ID) {
+		return
+	}
+
+	dht.mutex.Lock()
+	defer dht.mutex.Unlock()
+
+	bucketIndex := dht.getBucketIndex(node.ID)
+	if bucketIndex >= KEY_SIZE {
+		return
+	}
+	if dht.kBuckets[bucketIndex] == nil {
+		dht.kBuckets[bucketIndex] = &KBucket{
+			Nodes: make([]Node, 0, K_BUCKET_SIZE),
+		}
+	}
+	bucket := dht.kBuckets[bucketIndex]
+
+	// Check if node already exists
+	for i, n := range bucket.Nodes {
+		if bytes.Equal(n.ID, node.ID) {
+			// Move to end (most recently seen)
+			bucket.Nodes = append(bucket.Nodes[:i], bucket.Nodes[i+1:]...)
+			bucket.Nodes = append(bucket.Nodes, node)
+			return
+		}
+	}
+
+	// Add new node if bucket isn't full
+	if len(bucket.Nodes) < K_BUCKET_SIZE {
+		bucket.Nodes = append(bucket.Nodes, node)
+		return
+	}
+	// Easier to discard but better to ping
+	log.Printf("[%s] K-bucket %d is full, discarding new node %s",
+		dht.node.Address, bucketIndex, node.Address)
+}
+
+// findClosestNodes finds the k closest nodes to a target ID
+func (dht *DHTNode) findClosestNodes(targetID []byte, k int) []Node {
 	dht.mutex.RLock()
-	peers := make([]Node, 0, len(dht.routingTable))
-	for _, node := range dht.routingTable {
-		peers = append(peers, node)
+	defer dht.mutex.RUnlock()
+
+	// Create a map to store distances
+	distances := make(map[string][]byte)
+	var nodes []Node
+
+	// Calculate distances for all nodes in k-buckets
+	for _, bucket := range dht.kBuckets {
+		for _, node := range bucket.Nodes {
+			dist := Distance(targetID, node.ID)
+			distances[string(node.ID)] = dist
+			nodes = append(nodes, node)
+		}
+	}
+
+	// Sort nodes by distance to target
+	sort.Slice(nodes, func(i, j int) bool {
+		distI := distances[string(nodes[i].ID)]
+		distJ := distances[string(nodes[j].ID)]
+		return bytes.Compare(distI, distJ) < 0
+	})
+
+	// Return k closest nodes
+	if len(nodes) > k {
+		return nodes[:k]
+	}
+	return nodes
+}
+
+// ping checks if a node is still alive
+func (dht *DHTNode) ping(node Node) bool {
+	conn, err := net.DialTimeout("tcp", node.Address, time.Second)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+
+	// Send ping request
+	request := DHTRequest{
+		Type: "PING",
+	}
+
+	err = json.NewEncoder(conn).Encode(request)
+	if err != nil {
+		return false
+	}
+
+	// Wait for pong response
+	var response DHTRequest
+	err = json.NewDecoder(conn).Decode(&response)
+	return err == nil && response.Type == "PONG"
+}
+
+// Bootstrap performs the Kademlia bootstrap process
+func (dht *DHTNode) Bootstrap() error {
+	log.Printf("[%s] Starting Kademlia bootstrap", dht.node.Address)
+
+	// Load initial peers
+	dht.mutex.RLock()
+	var bootstrapNodes []Node
+	for _, bucket := range dht.kBuckets {
+		if bucket != nil {
+			bootstrapNodes = append(bootstrapNodes, bucket.Nodes...)
+		}
 	}
 	dht.mutex.RUnlock()
 
-	maxRetries := 3
-	retryDelay := time.Second
+	// If no bootstrap nodes, return early
+	if len(bootstrapNodes) == 0 {
+		log.Printf("[%s] No bootstrap nodes available", dht.node.Address)
+		return nil
+	}
 
-	for _, node := range peers {
+	// Keep track of queried nodes to avoid duplicates
+	queriedNodes := make(map[string]bool)
+
+	// Perform iterative node lookups
+	for _, node := range bootstrapNodes {
 		if node.Address == dht.node.Address {
 			continue
 		}
 
-		var connected bool
-		for retry := 1; retry <= maxRetries; retry++ {
-			log.Printf("[%s] Attempting to connect to %s (try %d/%d)",
-				dht.node.Address, node.Address, retry, maxRetries)
+		if queriedNodes[node.Address] {
+			continue
+		}
+		queriedNodes[node.Address] = true // Mark as queried
 
-			if err := dht.connectToPeer(node); err != nil {
-				log.Printf("[%s] Failed to connect to %s (attempt %d): %v",
-					dht.node.Address, node.Address, retry, err)
-				time.Sleep(retryDelay)
+		log.Printf("[%s] Finding closest nodes to %x through %s",
+			dht.node.Address, dht.node.ID, node.Address)
+
+		// Connect to bootstrap node
+		if err := dht.connectToPeer(node); err != nil {
+			log.Printf("[%s] Failed to connect to bootstrap node %s: %v",
+				dht.node.Address, node.Address, err)
+			continue
+		}
+
+		// Add the bootstrap node to our k-buckets
+		dht.addToKBucket(node)
+
+		// Find nodes closest to our ID
+		closestNodes := dht.findClosestNodes(dht.node.ID, NUMBER_OF_CLOSEST_PEERS)
+
+		// Query each of the closest nodes
+		for _, closeNode := range closestNodes {
+			if queriedNodes[closeNode.Address] {
+				continue
+			}
+			queriedNodes[closeNode.Address] = true // Mark as queried
+
+			log.Printf("[%s] Querying close node %s", dht.node.Address, closeNode.Address)
+
+			if err := dht.connectToPeer(closeNode); err != nil {
+				log.Printf("[%s] Failed to connect to close node %s: %v",
+					dht.node.Address, closeNode.Address, err)
 				continue
 			}
 
-			connected = true
-			log.Printf("[%s] Successfully connected to %s", dht.node.Address, node.Address)
-			break
-		}
-
-		if !connected {
-			log.Printf("[%s] Failed to connect to %s after %d attempts",
-				dht.node.Address, node.Address, maxRetries)
+			// Add successful connections to k-buckets
+			dht.addToKBucket(closeNode)
 		}
 	}
+
+	log.Printf("[%s] Bootstrap complete. Total nodes queried: %d",
+		dht.node.Address, len(queriedNodes))
 
 	return nil
 }
 
+// connectToPeer connects to a peer and sends a DHT request to get their k-buckets
+// Used for bootstrapping and node lookups
 func (dht *DHTNode) connectToPeer(node Node) error {
 	conn, err := net.DialTimeout("tcp", node.Address, time.Second*3)
 	if err != nil {
@@ -109,7 +258,7 @@ func (dht *DHTNode) connectToPeer(node Node) error {
 	conn.SetDeadline(time.Now().Add(time.Second * 5))
 
 	request := DHTRequest{
-		Type: "GET_DHT",
+		Type: REQUEST_GET_DHT,
 	}
 
 	log.Printf("[%s] Sending DHT request to %s", dht.node.Address, node.Address)
@@ -125,12 +274,12 @@ func (dht *DHTNode) connectToPeer(node Node) error {
 
 	log.Printf("[%s] Received response from %s", dht.node.Address, node.Address)
 
+	for _, node := range response.Nodes {
+		dht.addToKBucket(node)
+	}
+
 	// Update local DHT with unique entries
 	dht.mutex.Lock()
-	for _, node := range response.RoutingTable {
-		// Use node ID as key to ensure uniqueness
-		dht.routingTable[string(node.ID)] = node
-	}
 	for k, v := range response.DataStore {
 		dht.dataStore[k] = v
 	}
@@ -139,24 +288,62 @@ func (dht *DHTNode) connectToPeer(node Node) error {
 	return nil
 }
 
+// addNode adds a new node to the k-buckets
 func (dht *DHTNode) addNode(node Node) {
-	dht.mutex.Lock()
-	defer dht.mutex.Unlock()
-	dht.routingTable[string(node.ID)] = node
+	dht.addToKBucket(node)
 }
 
+// hasNode checks if a node is already in the k-buckets
 func (dht *DHTNode) hasNode(address string) bool {
 	dht.mutex.RLock()
 	defer dht.mutex.RUnlock()
 
-	for _, node := range dht.routingTable {
-		if node.Address == address {
-			return true
+	// Check all k-buckets for the node
+	for _, bucket := range dht.kBuckets {
+		for _, node := range bucket.Nodes {
+			if node.Address == address {
+				return true
+			}
 		}
 	}
 	return false
 }
 
+// getNode returns a node by its address if it exists in any k-bucket
+func (dht *DHTNode) getNode(address string) (Node, bool) {
+	dht.mutex.RLock()
+	defer dht.mutex.RUnlock()
+
+	for _, bucket := range dht.kBuckets {
+		for _, node := range bucket.Nodes {
+			if node.Address == address {
+				return node, true
+			}
+		}
+	}
+	return Node{}, false
+}
+
+// removeNode removes a node from its k-bucket if it exists
+func (dht *DHTNode) removeNode(address string) {
+	dht.mutex.Lock()
+	defer dht.mutex.Unlock()
+
+	for i, bucket := range dht.kBuckets {
+		for j, node := range bucket.Nodes {
+			if node.Address == address {
+				// Remove the node from the bucket
+				dht.kBuckets[i].Nodes = append(bucket.Nodes[:j], bucket.Nodes[j+1:]...)
+				return
+			}
+		}
+	}
+}
+
+// HandleDHTRequest handles incoming DHT requests
+// GET_DHT : Returns the k-buckets and data store
+// STORE   : Stores a key-value pair locally
+// GET	   : Retrieves a value from the local data store
 func (dht *DHTNode) HandleDHTRequest(conn net.Conn) {
 	defer conn.Close()
 
@@ -169,11 +356,18 @@ func (dht *DHTNode) HandleDHTRequest(conn net.Conn) {
 	log.Printf("[%s] Received DHT request type: %s", dht.node.Address, request.Type)
 
 	switch request.Type {
-	case "GET_DHT":
+	case REQUEST_GET_DHT:
+		var nodes []Node
 		dht.mutex.RLock()
+
+		// Add all nodes from k-buckets
+		for _, bucket := range dht.kBuckets {
+			nodes = append(nodes, bucket.Nodes...)
+		}
+
 		response := DHTResponse{
-			RoutingTable: dht.routingTable,
-			DataStore:    dht.dataStore,
+			Nodes:     nodes,
+			DataStore: dht.dataStore,
 		}
 		dht.mutex.RUnlock()
 
@@ -183,19 +377,58 @@ func (dht *DHTNode) HandleDHTRequest(conn net.Conn) {
 		}
 
 		log.Printf("[%s] DHT response sent", dht.node.Address)
+	case REQUEST_STORE:
+		if payload, ok := request.Payload.(map[string]string); ok {
+			key := payload["key"]
+			value := payload["value"]
+
+			dht.mutex.Lock()
+			dht.dataStore[key] = value
+			dht.mutex.Unlock()
+
+			log.Printf("[%s] Stored key-value pair: %s -> %s",
+				dht.node.Address, key, value)
+		}
+	case REQUEST_GET:
+		if payload, ok := request.Payload.(map[string]string); ok {
+			key := payload["key"]
+
+			dht.mutex.RLock()
+			value, exists := dht.dataStore[key]
+			dht.mutex.RUnlock()
+
+			if !exists {
+				log.Printf("[%s] Key not found: %s", dht.node.Address, key)
+				return
+			}
+
+			response := DHTResponse{
+				DataStore: map[string]string{
+					key: value,
+				},
+			}
+
+			if err := json.NewEncoder(conn).Encode(response); err != nil {
+				log.Printf("[%s] Error sending GET response: %v", dht.node.Address, err)
+				return
+			}
+
+			log.Printf("[%s] GET response sent", dht.node.Address)
+		}
 	}
 }
 
+// loadPeersFromConfig loads a list of peers from a configuration file
 func (dht *DHTNode) loadPeersFromConfig() error {
 	configPath := ".config/peers.txt"
+	log.Printf("[%s] Loading peers from %s", dht.node.Address, configPath)
 
 	file, err := os.Open(configPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open config file: %v", err)
 	}
 	defer file.Close()
 
-	// Use a map to track unique addresses
 	uniquePeers := make(map[string]Node)
 
 	scanner := bufio.NewScanner(file)
@@ -205,27 +438,43 @@ func (dht *DHTNode) loadPeersFromConfig() error {
 			continue
 		}
 
+		log.Printf("[%s] Processing peer: %s", dht.node.Address, line)
+
+		// Skip if this is our own address
+		if line == dht.node.Address {
+			log.Printf("[%s] Skipping self address", dht.node.Address)
+			continue
+		}
+
 		// Create node ID using address
-		id := sha1.Sum([]byte(line))
+		id := sha3.Sum256([]byte(line))
 		node := Node{
 			ID:      id[:],
 			Address: line,
 		}
 
-		// Store using address as key to ensure uniqueness
+		log.Printf("[%s] Created node with ID %x for address %s",
+			dht.node.Address, node.ID, node.Address)
+
 		uniquePeers[line] = node
 	}
 
-	// Now add unique peers to routing table
-	dht.mutex.Lock()
-	for _, node := range uniquePeers {
-		dht.routingTable[string(node.ID)] = node
-	}
-	dht.mutex.Unlock()
+	log.Printf("[%s] Found %d unique peers", dht.node.Address, len(uniquePeers))
 
-	return scanner.Err()
+	// Now add unique peers to routing table
+	for _, node := range uniquePeers {
+		log.Printf("[%s] Adding peer %s to routing table", dht.node.Address, node.Address)
+		dht.addToKBucket(node)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading config file: %v", err)
+	}
+
+	return nil
 }
 
+// savePeersToConfig saves a list of peers to a configuration file
 func (dht *DHTNode) savePeersToConfig() error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -251,40 +500,121 @@ func (dht *DHTNode) savePeersToConfig() error {
 	dht.mutex.RLock()
 	defer dht.mutex.RUnlock()
 
-	for _, node := range dht.routingTable {
-		_, err := file.WriteString(node.Address + "\n")
-		if err != nil {
-			return err
+	for _, bucket := range dht.kBuckets {
+		for _, node := range bucket.Nodes {
+			_, err := file.WriteString(node.Address + "\n")
+			if err != nil {
+				return err
+			}
 		}
 	}
 
 	return nil
 }
 
+// Store stores a key-value pair in the whole DHT
 func (dht *DHTNode) Store(key, value string) error {
+	// Find nodes closest to the key
+	keyHash := sha3.Sum256([]byte(key))
+	nodes := dht.findClosestNodes(keyHash[:], NUMBER_OF_CLOSEST_PEERS)
+
+	// Store locally
 	dht.mutex.Lock()
-	defer dht.mutex.Unlock()
 	dht.dataStore[key] = value
+	dht.mutex.Unlock()
+
+	// Store on closest nodes
+	for _, node := range nodes {
+		if node.Address == dht.node.Address {
+			continue
+		}
+
+		// Connect to the node
+		conn, err := net.DialTimeout("tcp", node.Address, time.Second*3)
+		if err != nil {
+			log.Printf("[%s] Failed to connect to node %s for storing: %v",
+				dht.node.Address, node.Address, err)
+			continue
+		}
+		defer conn.Close()
+
+		// Create store request
+		request := DHTRequest{
+			Type: REQUEST_STORE,
+			Payload: map[string]string{
+				"key":   key,
+				"value": value,
+			},
+		}
+
+		// Send the store request
+		if err := json.NewEncoder(conn).Encode(request); err != nil {
+			log.Printf("[%s] Failed to send store request to %s: %v",
+				dht.node.Address, node.Address, err)
+			continue
+		}
+	}
+
 	return nil
 }
 
+// Get retrieves a value from the DHT
+// Returns the value and a boolean indicating if the value was found
 func (dht *DHTNode) Get(key string) (string, bool) {
+	// Check local storage
 	dht.mutex.RLock()
-	defer dht.mutex.RUnlock()
 	value, ok := dht.dataStore[key]
-	return value, ok
+	dht.mutex.RUnlock()
+	if ok {
+		return value, true
+	}
+
+	// Find nodes closest to key
+	hash := sha3.Sum256([]byte(key))
+	nodes := dht.findClosestNodes(hash[:], NUMBER_OF_CLOSEST_PEERS)
+	// Ask those nodes for the value
+	for _, node := range nodes {
+		if node.Address == dht.node.Address {
+			continue
+		}
+
+		conn, err := net.DialTimeout("tcp", node.Address, 3*time.Second)
+		if err != nil {
+			log.Printf("[%s] Failed to connect to node %s for getting: %v",
+				dht.node.Address, node.Address, err)
+			continue
+		}
+		defer conn.Close()
+
+		request := DHTRequest{
+			Type: REQUEST_GET,
+			Payload: map[string]string{
+				"key": key,
+			},
+		}
+
+		if err := json.NewEncoder(conn).Encode(request); err != nil {
+			log.Printf("[%s] Failed to send get request to %s: %v",
+				dht.node.Address, node.Address, err)
+			continue
+		}
+
+		var response DHTResponse
+		if err := json.NewDecoder(conn).Decode(&response); err != nil {
+			log.Printf("[%s] Failed to decode get response from %s: %v",
+				dht.node.Address, node.Address, err)
+			continue
+		}
+
+		if value, exists := response.DataStore["value"]; exists {
+			return value, true
+		}
+	}
+	return "", false
 }
 
-func (dht *DHTNode) FindNode(target []byte) Node {
-	dht.mutex.RLock()
-	defer dht.mutex.RUnlock()
-	return dht.routingTable[string(target)]
-}
-
+// RegisterUser registers a user in the DHT
 func (dht *DHTNode) RegisterUser(userID string, address string) error {
-	dht.mutex.Lock()
-	defer dht.mutex.Unlock()
-
 	// Create user info
 	userInfo := map[string]string{
 		"userID":   userID,
@@ -299,11 +629,19 @@ func (dht *DHTNode) RegisterUser(userID string, address string) error {
 		return err
 	}
 
-	// Store in dataStore
+	// Store locally
+	dht.mutex.Lock()
 	dht.dataStore[userID] = string(infoBytes)
+	dht.mutex.Unlock()
+
+	// Store in DHT
+	dht.Store(userID, string(infoBytes))
+
 	return nil
 }
 
+// LookupUser looks up a user in the DHT
+// Returns the user info as a map
 func (dht *DHTNode) LookupUser(userID string) (map[string]string, error) {
 	dht.mutex.RLock()
 	defer dht.mutex.RUnlock()
@@ -322,21 +660,16 @@ func (dht *DHTNode) LookupUser(userID string) (map[string]string, error) {
 	return userInfo, nil
 }
 
+// Print prints the DHT node's state
 func (dht *DHTNode) Print() {
-	fmt.Println("\n=== Routing Table ===")
-	fmt.Println("Address -> NodeID")
-
-	// Create a map to check for duplicates
-	addresses := make(map[string][]string)
-
-	for _, node := range dht.routingTable {
-		nodeIDHex := fmt.Sprintf("%x", node.ID)
-		addresses[node.Address] = append(addresses[node.Address], nodeIDHex)
-	}
-
-	// Print unique addresses and their IDs
-	for addr, ids := range addresses {
-		fmt.Printf("%s -> %v\n", addr, ids)
+	fmt.Println("\n=== K-Buckets ===")
+	for i, bucket := range dht.kBuckets {
+		if len(bucket.Nodes) > 0 {
+			fmt.Printf("Bucket %d:\n", i)
+			for _, node := range bucket.Nodes {
+				fmt.Printf("  %s -> %x\n", node.Address, node.ID)
+			}
+		}
 	}
 
 	fmt.Println("\n=== Data Store ===")
