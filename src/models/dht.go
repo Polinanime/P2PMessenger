@@ -614,13 +614,14 @@ func (dht *DHTNode) Get(key string) (string, bool) {
 }
 
 // RegisterUser registers a user in the DHT
-func (dht *DHTNode) RegisterUser(userID string, address string) error {
+func (dht *DHTNode) RegisterUser(userID string, address string, publicKey []byte) error {
 	// Create user info
 	userInfo := map[string]string{
-		"userID":   userID,
-		"address":  address,
-		"status":   "online",
-		"lastSeen": time.Now().String(),
+		"userID":    userID,
+		"address":   address,
+		"status":    "online",
+		"lastSeen":  time.Now().String(),
+		"publicKey": string(publicKey),
 	}
 
 	// Convert to JSON

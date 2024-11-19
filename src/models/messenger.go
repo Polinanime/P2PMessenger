@@ -10,9 +10,10 @@ import (
 )
 
 type Message struct {
-	From    string
-	To      string
-	Content string
+	From             string
+	To               string
+	EncryptedContent []byte
+	PublicKey        []byte
 }
 
 type P2PMessenger struct {
@@ -20,10 +21,15 @@ type P2PMessenger struct {
 	userID   string
 	listener net.Listener
 	Ready    chan bool
+	KeyPair  *KeyPair
 }
 
 func NewP2PMessenger(userID string, port string) *P2PMessenger {
 	listener, err := net.Listen("tcp", "localhost:"+port)
+	if err != nil {
+		panic(err)
+	}
+	keyPair, err := GenerateKeyPair(2048)
 	if err != nil {
 		panic(err)
 	}
@@ -32,6 +38,7 @@ func NewP2PMessenger(userID string, port string) *P2PMessenger {
 		userID:   userID,
 		listener: listener,
 		Ready:    make(chan bool),
+		KeyPair:  keyPair,
 	}
 }
 
@@ -40,7 +47,12 @@ func (p *P2PMessenger) Start() error {
 		return fmt.Errorf("listener not initialized")
 	}
 
-	err := p.dht.RegisterUser(p.userID, p.listener.Addr().String())
+	publicKey, err := p.KeyPair.ExportPublicKey()
+	if err != nil {
+		return fmt.Errorf("failed to export public key: %v", err)
+	}
+
+	err = p.dht.RegisterUser(p.userID, p.listener.Addr().String(), publicKey)
 	if err != nil {
 		return fmt.Errorf("failed to register user: %v", err)
 	}
@@ -79,6 +91,23 @@ func (p *P2PMessenger) SendMessage(to, content string) error {
 		return fmt.Errorf("user lookup failed: %v", err)
 	}
 
+	recipientPubKey, err := ImportPublicKey([]byte(userInfo["publicKey"]))
+	if err != nil {
+		return fmt.Errorf("failed to import recipient public key: %v", err)
+	}
+
+	// Encrypt the message content
+	encryptedContent, err := Encrypt(recipientPubKey, []byte(content))
+	if err != nil {
+		return fmt.Errorf("encryption failed: %v", err)
+	}
+
+	// Get our public key
+	publicKeyPEM, err := p.KeyPair.ExportPublicKey()
+	if err != nil {
+		return fmt.Errorf("failed to export public key: %v", err)
+	}
+
 	log.Printf("[%s] Sending message to %s at %s", p.userID, to, userInfo["address"])
 
 	conn, err := net.Dial("tcp", userInfo["address"])
@@ -88,9 +117,10 @@ func (p *P2PMessenger) SendMessage(to, content string) error {
 	defer conn.Close()
 
 	message := Message{
-		From:    p.userID,
-		To:      to,
-		Content: content,
+		From:             p.userID,
+		To:               to,
+		EncryptedContent: encryptedContent,
+		PublicKey:        publicKeyPEM,
 	}
 
 	// Debug logging
@@ -152,9 +182,16 @@ func (p *P2PMessenger) handleDHTRequest(conn net.Conn) {
 }
 
 func (p *P2PMessenger) handleMessage(message Message) {
+	decryptedContent, err := p.KeyPair.Decrypt(message.EncryptedContent)
+
+	if err != nil {
+		log.Printf("[%s] Error decrypting message: %v", p.userID, err)
+		return
+	}
+
 	log.Printf("[%s] Received message from %s to %s", p.userID, message.From, message.To)
 	fmt.Printf("\n=== New Message ===\nFrom: %s\nTo: %s\nContent: %s\n\n",
-		message.From, message.To, message.Content)
+		message.From, message.To, string(decryptedContent))
 }
 
 func (p *P2PMessenger) Close() {
