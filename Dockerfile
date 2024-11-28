@@ -15,5 +15,8 @@ COPY src/ ./
 # Build the application
 RUN go build -o messenger
 
+COPY scripts/entrypoint.sh .
+RUN chmod +x entrypoint.sh
+
 # Command to run the application
-CMD ["./messenger"]
+CMD ["./entrypoint.sh"]

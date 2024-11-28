@@ -6,7 +6,6 @@ import (
 	"log"
 	"net"
 	"strings"
-	"time"
 )
 
 type Message struct {
@@ -19,13 +18,16 @@ type Message struct {
 type P2PMessenger struct {
 	dht      *DHTNode
 	userID   string
+	port     string
 	listener net.Listener
 	Ready    chan bool
 	KeyPair  *KeyPair
+	history  *MessageHistory
 }
 
 func NewP2PMessenger(userID string, port string) *P2PMessenger {
-	listener, err := net.Listen("tcp", "localhost:"+port)
+	address := fmt.Sprintf("0.0.0.0:%s", port)
+	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		panic(err)
 	}
@@ -33,12 +35,18 @@ func NewP2PMessenger(userID string, port string) *P2PMessenger {
 	if err != nil {
 		panic(err)
 	}
+
+	containerIP := getContainerIP()
+	dhtAddress := fmt.Sprintf("%s:%s", containerIP, port)
+
 	return &P2PMessenger{
-		dht:      NewDHTNode("localhost:" + port),
+		dht:      NewDHTNode(dhtAddress),
 		userID:   userID,
+		port:     port,
 		listener: listener,
 		Ready:    make(chan bool),
 		KeyPair:  keyPair,
+		history:  NewMessageHistory(),
 	}
 }
 
@@ -47,14 +55,27 @@ func (p *P2PMessenger) Start() error {
 		return fmt.Errorf("listener not initialized")
 	}
 
-	publicKey, err := p.KeyPair.ExportPublicKey()
+	// Export public key for registration
+	publicKeyPEM, err := p.KeyPair.ExportPublicKey()
 	if err != nil {
 		return fmt.Errorf("failed to export public key: %v", err)
 	}
 
-	err = p.dht.RegisterUser(p.userID, p.listener.Addr().String(), publicKey)
+	containerIP := getContainerIP()
+	address := fmt.Sprintf("%s:%s", containerIP, p.port)
+
+	log.Printf("[%s] Registering with address: %s", p.userID, address)
+
+	// Register user in DHT
+	err = p.dht.RegisterUser(p.userID, address, publicKeyPEM)
 	if err != nil {
 		return fmt.Errorf("failed to register user: %v", err)
+	}
+
+	// Bootstrap the DHT
+	err = p.dht.Bootstrap()
+	if err != nil {
+		return fmt.Errorf("failed to bootstrap DHT: %v", err)
 	}
 
 	// Start listening for incoming messages
@@ -72,23 +93,44 @@ func (p *P2PMessenger) Start() error {
 		}
 	}()
 
-	log.Printf("[%s] Ready to accept connections", p.userID)
-	p.Ready <- true
-	time.Sleep(1 * time.Second) // Ready to be sure
-
-	log.Printf("[%s] Starting bootstrap process", p.userID)
-	err = p.dht.Bootstrap()
-	if err != nil {
-		return fmt.Errorf("Failed to bootstrap DHT: %v", err)
-	}
-
 	return nil
+}
+
+func (p *P2PMessenger) PrintUsers() {
+	p.dht.mutex.RLock()
+	defer p.dht.mutex.RUnlock()
+
+	fmt.Println("\n=== Registered Users ===")
+	for _, value := range p.dht.dataStore {
+		var userInfo map[string]string
+		if err := json.Unmarshal([]byte(value), &userInfo); err == nil {
+			if _, ok := userInfo["userID"]; ok {
+				fmt.Printf("UserID: %s\n", userInfo["userID"])
+				fmt.Printf("Address: %s\n", userInfo["address"])
+				fmt.Printf("Status: %s\n", userInfo["status"])
+				fmt.Printf("Last Seen: %s\n\n", userInfo["lastSeen"])
+			}
+		}
+	}
+}
+
+func (p *P2PMessenger) ScanPeers() error {
+	return p.dht.Bootstrap()
+}
+
+func (p *P2PMessenger) GetAddress() string {
+	return p.listener.Addr().String()
 }
 
 func (p *P2PMessenger) SendMessage(to, content string) error {
 	userInfo, err := p.dht.LookupUser(to)
 	if err != nil {
 		return fmt.Errorf("user lookup failed: %v", err)
+	}
+
+	address := userInfo["address"]
+	if address == "" {
+		return fmt.Errorf("invalid address for user %s", to)
 	}
 
 	recipientPubKey, err := ImportPublicKey([]byte(userInfo["publicKey"]))
@@ -110,7 +152,7 @@ func (p *P2PMessenger) SendMessage(to, content string) error {
 
 	log.Printf("[%s] Sending message to %s at %s", p.userID, to, userInfo["address"])
 
-	conn, err := net.Dial("tcp", userInfo["address"])
+	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		return fmt.Errorf("connection failed: %v", err)
 	}
@@ -200,4 +242,39 @@ func (p *P2PMessenger) Close() {
 
 func (p *P2PMessenger) PrintDht() {
 	p.dht.Print()
+}
+
+func (p *P2PMessenger) GetUserID() string {
+	return p.userID
+}
+
+func (p *P2PMessenger) GetHistory() []ChatMessage {
+	p.history.mutex.RLock()
+	defer p.history.mutex.RUnlock()
+	return p.history.GetMessages()
+}
+
+func getContainerIP() string {
+	// Default to Docker network IP if available
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "172.18.0.1" // fallback
+	}
+
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok {
+				if ipnet.IP.To4() != nil && !ipnet.IP.IsLoopback() {
+					return ipnet.IP.String()
+				}
+			}
+		}
+	}
+
+	return "172.18.0.1" // fallback
 }
