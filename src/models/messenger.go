@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"time"
 )
 
 type Message struct {
@@ -123,6 +124,10 @@ func (p *P2PMessenger) GetAddress() string {
 }
 
 func (p *P2PMessenger) SendMessage(to, content string) error {
+	if to == p.userID {
+		return fmt.Errorf("cannot send message to myself")
+	}
+
 	userInfo, err := p.dht.LookupUser(to)
 	if err != nil {
 		return fmt.Errorf("user lookup failed: %v", err)
@@ -174,6 +179,15 @@ func (p *P2PMessenger) SendMessage(to, content string) error {
 	}
 
 	log.Printf("[%s] Message sent successfully to %s", p.userID, to)
+
+	// Saving message to history (Only after successful send)
+	go p.history.AddMessage(ChatMessage{
+		To:        to,
+		From:      p.userID,
+		Content:   content,
+		Timestamp: time.Now(),
+	})
+
 	return nil
 }
 
@@ -230,6 +244,14 @@ func (p *P2PMessenger) handleMessage(message Message) {
 		log.Printf("[%s] Error decrypting message: %v", p.userID, err)
 		return
 	}
+
+	// Saving message to history (after successful decryption)
+	go p.history.AddMessage(ChatMessage{
+		From:      message.From,
+		To:        message.To,
+		Content:   string(decryptedContent), // Save decrypted content
+		Timestamp: time.Now(),
+	})
 
 	log.Printf("[%s] Received message from %s to %s", p.userID, message.From, message.To)
 	fmt.Printf("\n=== New Message ===\nFrom: %s\nTo: %s\nContent: %s\n\n",
