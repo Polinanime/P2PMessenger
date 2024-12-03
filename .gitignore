@@ -17,6 +17,9 @@
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
+# Log files
+*.log
+
 # Go workspace file
 go.work
 go.work.sum
@@ -24,8 +27,11 @@ go.work.sum
 # env file
 .env
 
+# config dir
+.config
+
+# Some configs and apple moments
 .DS_Store
 .idea
 .zed
 .vscode
-.config
