@@ -97,10 +97,23 @@ func (p *P2PMessenger) Start() error {
 	return nil
 }
 
-func (p *P2PMessenger) PrintUsers() {
+func (p *P2PMessenger) GetUsers() []map[string]string {
 	p.dht.mutex.RLock()
 	defer p.dht.mutex.RUnlock()
 
+	var users []map[string]string
+	for _, value := range p.dht.dataStore {
+		var userInfo map[string]string
+		if err := json.Unmarshal([]byte(value), &userInfo); err == nil {
+			if _, ok := userInfo["userID"]; ok {
+				users = append(users, userInfo)
+			}
+		}
+	}
+	return users
+}
+
+func (p *P2PMessenger) PrintUsers() {
 	fmt.Println("\n=== Registered Users ===")
 	for _, value := range p.dht.dataStore {
 		var userInfo map[string]string

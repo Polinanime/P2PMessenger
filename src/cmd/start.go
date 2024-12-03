@@ -3,16 +3,20 @@ package cmd
 import (
 	"bufio"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"strings"
 
 	"github.com/polinanime/p2pmessenger/models"
+	"github.com/polinanime/p2pmessenger/ui"
 	"github.com/spf13/cobra"
 )
 
 var (
 	userID string
 	port   string
+	runUi  bool
 )
 
 var startCmd = &cobra.Command{
@@ -23,6 +27,7 @@ var startCmd = &cobra.Command{
 }
 
 func init() {
+	startCmd.Flags().BoolVarP(&runUi, "run-ui", "u", true, "default: true.")
 	rootCmd.AddCommand(startCmd)
 	// startCmd.Flags().StringVarP(&userID, "user", "u", "", "User ID for the messenger")
 	// startCmd.Flags().StringVarP(&port, "port", "p", "", "Port to listen")
@@ -42,6 +47,15 @@ func startMessenger(cmd *cobra.Command, args []string) {
 		panic(err)
 	}
 
+	if runUi {
+		u, err := ui.NewUI(messenger)
+		if err != nil {
+			log.Panicln(err)
+		}
+		u.StartGui()
+		return
+	}
+
 	fmt.Printf("\n=== P2P Messenger ===\n")
 	fmt.Printf("User: %s\n", userID)
 	fmt.Printf("Port: %s\n", port)
@@ -53,6 +67,10 @@ func startMessenger(cmd *cobra.Command, args []string) {
 		fmt.Print("> ")
 		input, err := reader.ReadString('\n')
 		if err != nil {
+			if err == io.EOF {
+				fmt.Println("EOF received, continuing...")
+				continue
+			}
 			fmt.Printf("Error reading input: %v\n", err)
 			continue
 		}
@@ -91,7 +109,7 @@ func startMessenger(cmd *cobra.Command, args []string) {
 				showAllHistory(messenger)
 			}
 		case "scan":
-			fmt.Println("\nScanning for new messages...")
+			fmt.Println("\nScanning for users...")
 			messenger.ScanPeers()
 		case "whoami":
 			printWhoAmI(messenger)
