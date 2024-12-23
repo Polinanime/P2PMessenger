@@ -173,7 +173,7 @@ func (p *P2PMessenger) SendMessage(to, content string) error {
 		To:               to,
 		EncryptedContent: encryptedContent,
 		PublicKey:        publicKeyPEM,
-		FromAddress:      p.GetAddress(),
+		FromAddress:      getContainerIP() + ":" + p.port,
 	}
 
 	// Debug logging
@@ -200,7 +200,6 @@ func (p *P2PMessenger) SendMessage(to, content string) error {
 func (p *P2PMessenger) handleIncomingConnection(conn net.Conn) {
 	defer conn.Close()
 
-	// Read all data from connection first
 	reader := bufio.NewReader(conn)
 
 	// Read until we get a complete JSON message
@@ -210,12 +209,19 @@ func (p *P2PMessenger) handleIncomingConnection(conn net.Conn) {
 		return
 	}
 
-	log.Printf("[%s] New connection from %s, received %d bytes", p.userID, conn.RemoteAddr(), len(data))
+	log.Printf("[%s] New connection from %s, received %d bytes",
+		p.userID, conn.RemoteAddr(), len(data))
 
 	// Try to decode as DHT request first
 	var dhtRequest DHTRequest
-	if err := json.Unmarshal(data, &dhtRequest); err == nil && dhtRequest.Type == REQUEST_GET || dhtRequest.Type == REQUEST_STORE || dhtRequest.Type == REQUEST_GET_DHT {
-		p.handleDHTRequest(conn)
+	if err := json.Unmarshal(data, &dhtRequest); err == nil &&
+		(dhtRequest.Type == REQUEST_GET ||
+			dhtRequest.Type == REQUEST_STORE ||
+			dhtRequest.Type == REQUEST_GET_DHT) {
+		// Handle DHT request directly instead of passing the connection
+		if err := p.handleDHTRequest(dhtRequest, conn); err != nil {
+			log.Printf("[%s] Error handling DHT request: %v", p.userID, err)
+		}
 		return
 	}
 
@@ -226,22 +232,30 @@ func (p *P2PMessenger) handleIncomingConnection(conn net.Conn) {
 		return
 	}
 
-	log.Printf("[%s] Could not decode incoming data as either DHT request or message", p.userID)
+	log.Printf("[%s] Could not decode incoming data as either DHT request or message",
+		p.userID)
 }
 
-func (p *P2PMessenger) handleDHTRequest(conn net.Conn) {
-	log.Printf("[%s] Handling DHT request", p.userID)
+// HandleDHTRequest handles incoming DHT requests
+// GET_DHT : Returns the k-buckets and data store
+// STORE   : Stores a key-value pair locally
+// GET	   : Retrieves a value from the local data store
+// PING    : Responds with a PONG
+func (p *P2PMessenger) handleDHTRequest(request DHTRequest, conn net.Conn) error {
+	log.Printf("[%s] Handling DHT request type: %s", p.userID, request.Type)
 
-	response := DHTResponse{
-		DataStore: p.dht.dataStore,
+	switch request.Type {
+	case REQUEST_GET_DHT:
+		return p.dht.handleGetDHT(conn)
+	case REQUEST_STORE:
+		return p.dht.handleStore(request)
+	case REQUEST_GET:
+		return p.dht.handleGet(conn, request)
+	case REQUEST_PING:
+		return p.dht.handlePing(conn)
 	}
 
-	if err := json.NewEncoder(conn).Encode(response); err != nil {
-		log.Printf("[%s] Error sending DHT response: %v", p.userID, err)
-		return
-	}
-
-	log.Printf("[%s] DHT response sent", p.userID)
+	return fmt.Errorf("unknown request type: %s", request.Type)
 }
 
 func (p *P2PMessenger) handleMessage(message Message) {

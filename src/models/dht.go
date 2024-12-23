@@ -27,8 +27,8 @@ type DHTNode struct {
 
 // DHTRequest is a request to the DHT
 type DHTRequest struct {
-	Type    string
-	Payload interface{}
+	Type    string      `json:"type"`
+	Payload interface{} `json:"payload"`
 }
 
 // DHTResponse is the response to a DHT request
@@ -334,36 +334,8 @@ func (dht *DHTNode) removeNode(address string) {
 	}
 }
 
-// HandleDHTRequest handles incoming DHT requests
-// GET_DHT : Returns the k-buckets and data store
-// STORE   : Stores a key-value pair locally
-// GET	   : Retrieves a value from the local data store
-// PING    : Responds with a PONG
-func (dht *DHTNode) HandleDHTRequest(conn net.Conn) {
-	defer conn.Close()
-
-	var request DHTRequest
-	if err := json.NewDecoder(conn).Decode(&request); err != nil {
-		log.Printf("[%s] Error decoding DHT request: %v", dht.node.Address, err)
-		return
-	}
-
-	log.Printf("[%s] Received DHT request type: %s", dht.node.Address, request.Type)
-
-	switch request.Type {
-	case REQUEST_GET_DHT:
-		dht.handleGetDHT(conn)
-	case REQUEST_STORE:
-		dht.handleStore(request)
-	case REQUEST_GET:
-		dht.handleGet(conn, request)
-	case REQUEST_PING:
-		dht.handlePing(conn)
-	}
-}
-
 // handleGetDHT sends the k-buckets and data store to the requesting node
-func (dht *DHTNode) handleGetDHT(conn net.Conn) {
+func (dht *DHTNode) handleGetDHT(conn net.Conn) error {
 	var nodes []Node
 	dht.mutex.RLock()
 
@@ -380,66 +352,117 @@ func (dht *DHTNode) handleGetDHT(conn net.Conn) {
 
 	if err := json.NewEncoder(conn).Encode(response); err != nil {
 		log.Printf("[%s] Error sending DHT response: %v", dht.node.Address, err)
-		return
+		return err
 	}
 
 	log.Printf("[%s] DHT response sent", dht.node.Address)
+	return nil
 }
 
 // handleStore stores a key-value pair in the local data store
-func (dht *DHTNode) handleStore(request DHTRequest) {
-	if payload, ok := request.Payload.(map[string]string); ok {
-		key := payload["key"]
-		value := payload["value"]
-
-		dht.mutex.Lock()
-		dht.dataStore[key] = value
-		dht.mutex.Unlock()
-
-		log.Printf("[%s] Stored key-value pair: %s -> %s",
-			dht.node.Address, key, value)
+func (dht *DHTNode) handleStore(request DHTRequest) error {
+	if request.Payload == nil {
+		return fmt.Errorf("empty payload")
 	}
+
+	// Assert the payload to map[string]string
+	payload, ok := request.Payload.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("invalid payload type: expected map[string]string, got %T", request.Payload)
+	}
+
+	// Extract key and value, converting to strings
+	key, ok := payload["key"].(string)
+	if !ok {
+		return fmt.Errorf("missing or invalid key in payload")
+	}
+
+	value, ok := payload["value"].(string)
+	if !ok {
+		return fmt.Errorf("missing or invalid value in payload")
+	}
+
+	dht.mutex.Lock()
+	dht.dataStore[key] = value
+	dht.mutex.Unlock()
+
+	log.Printf("[%s] Stored key-value pair: %s -> %s",
+		dht.node.Address, key, value)
+	return nil
 }
 
 // handleGet retrieves a value from the local data store
-func (dht *DHTNode) handleGet(conn net.Conn, request DHTRequest) {
+func (dht *DHTNode) handleGet(conn net.Conn, request DHTRequest) error {
 	if payload, ok := request.Payload.(map[string]string); ok {
 		key := payload["key"]
 
+		// First check local storage
 		dht.mutex.RLock()
 		value, exists := dht.dataStore[key]
 		dht.mutex.RUnlock()
 
+		var response DHTResponse
 		if !exists {
-			log.Printf("[%s] Key not found: %s", dht.node.Address, key)
-			return
+			// Key not found locally, find closest nodes
+			log.Printf("[%s] Key '%s' not found locally, returning closest nodes",
+				dht.node.Address, key)
+
+			// Get hash of the key for finding closest nodes
+			keyHash := sha3.Sum256([]byte(key))
+			closestNodes := dht.findClosestNodes(keyHash[:], NUMBER_OF_CLOSEST_PEERS)
+
+			// Filter out requesting node if it's in the closest nodes
+			filteredNodes := make([]Node, 0)
+			requestAddr := conn.RemoteAddr().String()
+			for _, node := range closestNodes {
+				if node.Address != requestAddr {
+					filteredNodes = append(filteredNodes, node)
+				}
+			}
+
+			response = DHTResponse{
+				Nodes:     filteredNodes,
+				DataStore: nil,
+			}
+
+			log.Printf("[%s] Returning %d closest nodes for key '%s'",
+				dht.node.Address, len(filteredNodes), key)
+		} else {
+			// We found the value locally
+			response = DHTResponse{
+				Nodes: nil, // No need to include nodes when we have the value
+				DataStore: map[string]string{
+					key: value,
+				},
+			}
+			log.Printf("[%s] Found value locally for key '%s'",
+				dht.node.Address, key)
 		}
 
-		response := DHTResponse{
-			DataStore: map[string]string{
-				key: value,
-			},
-		}
-
+		// Send the response
 		if err := json.NewEncoder(conn).Encode(response); err != nil {
-			log.Printf("[%s] Error sending GET response: %v", dht.node.Address, err)
-			return
+			log.Printf("[%s] Error sending GET response: %v",
+				dht.node.Address, err)
+			return err
 		}
 
-		log.Printf("[%s] GET response sent", dht.node.Address)
+		log.Printf("[%s] GET response sent successfully", dht.node.Address)
+		return nil
 	}
+	return fmt.Errorf("invalid payload format")
 }
 
 // handlePing responds to a PING request with a PONG
-func (dht *DHTNode) handlePing(conn net.Conn) {
+func (dht *DHTNode) handlePing(conn net.Conn) error {
 	request := DHTRequest{
 		Type: REQUEST_PONG,
 	}
 
 	if err := json.NewEncoder(conn).Encode(request); err != nil {
 		log.Printf("[%s] Error sending PONG response: %v", dht.node.Address, err)
-		return
+		return err
 	}
+	return nil
 }
 
 // loadPeersFromConfig loads a list of peers from a configuration file
@@ -518,7 +541,7 @@ func (dht *DHTNode) Store(key, value string) error {
 		}
 		defer conn.Close()
 
-		// Create store request
+		// Create store request with properly typed payload
 		request := DHTRequest{
 			Type: REQUEST_STORE,
 			Payload: map[string]string{
@@ -541,7 +564,7 @@ func (dht *DHTNode) Store(key, value string) error {
 // Get retrieves a value from the DHT
 // Returns the value and a boolean indicating if the value was found
 func (dht *DHTNode) Get(key string) (string, bool) {
-	// Check local storage
+	// Check local storage first
 	dht.mutex.RLock()
 	value, ok := dht.dataStore[key]
 	dht.mutex.RUnlock()
@@ -549,22 +572,32 @@ func (dht *DHTNode) Get(key string) (string, bool) {
 		return value, true
 	}
 
+	// Keep track of queried nodes to avoid loops
+	queriedNodes := make(map[string]bool)
+	queriedNodes[dht.node.Address] = true
+
 	// Find nodes closest to key
 	hash := sha3.Sum256([]byte(key))
-	nodes := dht.findClosestNodes(hash[:], NUMBER_OF_CLOSEST_PEERS)
-	// Ask those nodes for the value
-	for _, node := range nodes {
-		if node.Address == dht.node.Address {
+	nodesToQuery := dht.findClosestNodes(hash[:], NUMBER_OF_CLOSEST_PEERS)
+
+	// Keep querying until we find the value or run out of nodes
+	for len(nodesToQuery) > 0 {
+		node := nodesToQuery[0]
+		nodesToQuery = nodesToQuery[1:]
+
+		// Skip if we've already queried this node
+		if queriedNodes[node.Address] {
 			continue
 		}
+		queriedNodes[node.Address] = true
 
+		// Query the node
 		conn, err := net.DialTimeout("tcp", node.Address, 3*time.Second)
 		if err != nil {
 			log.Printf("[%s] Failed to connect to node %s for getting: %v",
 				dht.node.Address, node.Address, err)
 			continue
 		}
-		defer conn.Close()
 
 		request := DHTRequest{
 			Type: REQUEST_GET,
@@ -574,22 +607,38 @@ func (dht *DHTNode) Get(key string) (string, bool) {
 		}
 
 		if err := json.NewEncoder(conn).Encode(request); err != nil {
-			log.Printf("[%s] Failed to send get request to %s: %v",
-				dht.node.Address, node.Address, err)
+			conn.Close()
 			continue
 		}
 
 		var response DHTResponse
 		if err := json.NewDecoder(conn).Decode(&response); err != nil {
-			log.Printf("[%s] Failed to decode get response from %s: %v",
-				dht.node.Address, node.Address, err)
+			conn.Close()
 			continue
 		}
+		conn.Close()
 
-		if value, exists := response.DataStore["value"]; exists {
-			return value, true
+		// Check if we got the value
+		if response.DataStore != nil {
+			if value, exists := response.DataStore[key]; exists {
+				// Store it locally for future use
+				dht.mutex.Lock()
+				dht.dataStore[key] = value
+				dht.mutex.Unlock()
+				return value, true
+			}
+		}
+
+		// If we got more nodes to query, add them to our list
+		if response.Nodes != nil {
+			for _, newNode := range response.Nodes {
+				if !queriedNodes[newNode.Address] {
+					nodesToQuery = append(nodesToQuery, newNode)
+				}
+			}
 		}
 	}
+
 	return "", false
 }
 
