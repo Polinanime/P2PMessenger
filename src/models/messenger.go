@@ -1,6 +1,7 @@
 package models
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -16,6 +17,7 @@ type Message struct {
 	To               string
 	EncryptedContent []byte
 	PublicKey        []byte
+	FromAddress      string
 }
 
 type P2PMessenger struct {
@@ -171,6 +173,7 @@ func (p *P2PMessenger) SendMessage(to, content string) error {
 		To:               to,
 		EncryptedContent: encryptedContent,
 		PublicKey:        publicKeyPEM,
+		FromAddress:      p.GetAddress(),
 	}
 
 	// Debug logging
@@ -198,15 +201,16 @@ func (p *P2PMessenger) handleIncomingConnection(conn net.Conn) {
 	defer conn.Close()
 
 	// Read all data from connection first
-	buf := make([]byte, 1024)
-	n, err := conn.Read(buf)
+	reader := bufio.NewReader(conn)
+
+	// Read until we get a complete JSON message
+	data, err := reader.ReadBytes('\n')
 	if err != nil {
 		log.Printf("[%s] Error reading from connection: %v", p.userID, err)
 		return
 	}
-	data := buf[:n]
 
-	log.Printf("[%s] New connection from %s, received %d bytes", p.userID, conn.RemoteAddr(), n)
+	log.Printf("[%s] New connection from %s, received %d bytes", p.userID, conn.RemoteAddr(), len(data))
 
 	// Try to decode as DHT request first
 	var dhtRequest DHTRequest
@@ -241,6 +245,25 @@ func (p *P2PMessenger) handleDHTRequest(conn net.Conn) {
 }
 
 func (p *P2PMessenger) handleMessage(message Message) {
+
+	// Check if we know the sender
+	_, err := p.dht.LookupUser(message.From)
+	if err != nil {
+		// User not found in our DHT
+		log.Printf("[%s] New user discovered: %s, adding to DHT", p.userID, message.From)
+
+		// Get sender's address from the connection
+		senderAddr := message.FromAddress
+
+		// Register the new user in our DHT
+		err = p.dht.RegisterUser(message.From, senderAddr, message.PublicKey)
+		if err != nil {
+			log.Printf("[%s] Failed to add new user to DHT: %v", p.userID, err)
+		} else {
+			log.Printf("[%s] Successfully added user %s to DHT", p.userID, message.From)
+		}
+	}
+
 	decryptedContent, err := p.KeyPair.Decrypt(message.EncryptedContent)
 
 	if err != nil {
@@ -256,7 +279,10 @@ func (p *P2PMessenger) handleMessage(message Message) {
 		Timestamp: time.Now(),
 	})
 
+	// Debug logging
 	log.Printf("[%s] Received message from %s to %s", p.userID, message.From, message.To)
+
+	// Print message to console
 	fmt.Printf("\n=== New Message ===\nFrom: %s\nTo: %s\nContent: %s\n\n",
 		message.From, message.To, string(decryptedContent))
 }
