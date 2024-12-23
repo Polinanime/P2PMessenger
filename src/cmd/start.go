@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/polinanime/p2pmessenger/models"
+	"github.com/polinanime/p2pmessenger/utils"
 	"github.com/spf13/cobra"
 )
 
@@ -34,8 +35,10 @@ func init() {
 func startMessenger(cmd *cobra.Command, args []string) {
 	userID := args[0]
 	port := args[1]
+	configPath := ".config/peers.txt"
+	settings := utils.NewSettings(userID, port, configPath)
 
-	messenger := models.NewP2PMessenger(userID, port)
+	messenger := models.NewP2PMessenger(*settings)
 	defer messenger.Close()
 
 	if err := messenger.Start(); err != nil {

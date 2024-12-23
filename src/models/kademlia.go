@@ -3,10 +3,12 @@ package models
 import (
 	"bytes"
 	"math/bits"
+
+	"github.com/polinanime/p2pmessenger/types"
 )
 
 type KBucket struct {
-	Nodes []Node
+	Nodes []types.Node
 }
 
 // Distance returns the XOR distance between two byte slices.

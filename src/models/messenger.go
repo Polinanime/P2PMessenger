@@ -7,6 +7,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"github.com/polinanime/p2pmessenger/utils"
 )
 
 type Message struct {
@@ -26,8 +28,8 @@ type P2PMessenger struct {
 	history  *MessageHistory
 }
 
-func NewP2PMessenger(userID string, port string) *P2PMessenger {
-	address := fmt.Sprintf("0.0.0.0:%s", port)
+func NewP2PMessenger(settings utils.Settings) *P2PMessenger {
+	address := fmt.Sprintf("0.0.0.0:%s", settings.Port)
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		panic(err)
@@ -38,12 +40,13 @@ func NewP2PMessenger(userID string, port string) *P2PMessenger {
 	}
 
 	containerIP := getContainerIP()
-	dhtAddress := fmt.Sprintf("%s:%s", containerIP, port)
+	dhtAddress := fmt.Sprintf("%s:%s", containerIP, settings.Port)
+	settings.Address = dhtAddress // Update settings with DHT address
 
 	return &P2PMessenger{
-		dht:      NewDHTNode(dhtAddress),
-		userID:   userID,
-		port:     port,
+		dht:      NewDHTNode(settings),
+		userID:   settings.Username,
+		port:     settings.Port,
 		listener: listener,
 		Ready:    make(chan bool),
 		KeyPair:  keyPair,

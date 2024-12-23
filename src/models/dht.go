@@ -1,7 +1,6 @@
 package models
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -10,18 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
+	. "github.com/polinanime/p2pmessenger/types"
+	"github.com/polinanime/p2pmessenger/utils"
 	"golang.org/x/crypto/sha3"
 )
-
-// Node represents a node in the DHT
-type Node struct {
-	ID      []byte
-	Address string
-}
 
 // DHTNode represents a node in the DHT
 type DHTNode struct {
@@ -44,14 +38,11 @@ type DHTResponse struct {
 }
 
 // NewDHTNode creates a new DHT node with the given address
-func NewDHTNode(address string) *DHTNode {
-	id := sha3.Sum256([]byte(address))
+func NewDHTNode(settings utils.Settings) *DHTNode {
+	node := settings.CreateNode()
 
 	dht := &DHTNode{
-		node: Node{
-			ID:      id[:],
-			Address: address,
-		},
+		node:      node,
 		dataStore: make(map[string]string),
 	}
 
@@ -62,10 +53,13 @@ func NewDHTNode(address string) *DHTNode {
 		}
 	}
 
-	err := dht.loadPeersFromConfig()
+	peers, err := settings.ReadPeers(node.Address)
 	if err != nil {
 		log.Println("Warning: failed to load peers from configuration file")
+	} else {
+		dht.loadPeersFromConfig(peers)
 	}
+
 	return dht
 }
 
@@ -156,7 +150,7 @@ func (dht *DHTNode) ping(node Node) bool {
 
 	// Send ping request
 	request := DHTRequest{
-		Type: "PING",
+		Type: REQUEST_PING,
 	}
 
 	err = json.NewEncoder(conn).Encode(request)
@@ -167,7 +161,7 @@ func (dht *DHTNode) ping(node Node) bool {
 	// Wait for pong response
 	var response DHTRequest
 	err = json.NewDecoder(conn).Decode(&response)
-	return err == nil && response.Type == "PONG"
+	return err == nil && response.Type == REQUEST_PONG
 }
 
 // Bootstrap performs the Kademlia bootstrap process
@@ -344,6 +338,7 @@ func (dht *DHTNode) removeNode(address string) {
 // GET_DHT : Returns the k-buckets and data store
 // STORE   : Stores a key-value pair locally
 // GET	   : Retrieves a value from the local data store
+// PING    : Responds with a PONG
 func (dht *DHTNode) HandleDHTRequest(conn net.Conn) {
 	defer conn.Close()
 
@@ -357,118 +352,103 @@ func (dht *DHTNode) HandleDHTRequest(conn net.Conn) {
 
 	switch request.Type {
 	case REQUEST_GET_DHT:
-		var nodes []Node
+		dht.handleGetDHT(conn)
+	case REQUEST_STORE:
+		dht.handleStore(request)
+	case REQUEST_GET:
+		dht.handleGet(conn, request)
+	case REQUEST_PING:
+		dht.handlePing(conn)
+	}
+}
+
+// handleGetDHT sends the k-buckets and data store to the requesting node
+func (dht *DHTNode) handleGetDHT(conn net.Conn) {
+	var nodes []Node
+	dht.mutex.RLock()
+
+	// Add all nodes from k-buckets
+	for _, bucket := range dht.kBuckets {
+		nodes = append(nodes, bucket.Nodes...)
+	}
+
+	response := DHTResponse{
+		Nodes:     nodes,
+		DataStore: dht.dataStore,
+	}
+	dht.mutex.RUnlock()
+
+	if err := json.NewEncoder(conn).Encode(response); err != nil {
+		log.Printf("[%s] Error sending DHT response: %v", dht.node.Address, err)
+		return
+	}
+
+	log.Printf("[%s] DHT response sent", dht.node.Address)
+}
+
+// handleStore stores a key-value pair in the local data store
+func (dht *DHTNode) handleStore(request DHTRequest) {
+	if payload, ok := request.Payload.(map[string]string); ok {
+		key := payload["key"]
+		value := payload["value"]
+
+		dht.mutex.Lock()
+		dht.dataStore[key] = value
+		dht.mutex.Unlock()
+
+		log.Printf("[%s] Stored key-value pair: %s -> %s",
+			dht.node.Address, key, value)
+	}
+}
+
+// handleGet retrieves a value from the local data store
+func (dht *DHTNode) handleGet(conn net.Conn, request DHTRequest) {
+	if payload, ok := request.Payload.(map[string]string); ok {
+		key := payload["key"]
+
 		dht.mutex.RLock()
-
-		// Add all nodes from k-buckets
-		for _, bucket := range dht.kBuckets {
-			nodes = append(nodes, bucket.Nodes...)
-		}
-
-		response := DHTResponse{
-			Nodes:     nodes,
-			DataStore: dht.dataStore,
-		}
+		value, exists := dht.dataStore[key]
 		dht.mutex.RUnlock()
 
-		if err := json.NewEncoder(conn).Encode(response); err != nil {
-			log.Printf("[%s] Error sending DHT response: %v", dht.node.Address, err)
+		if !exists {
+			log.Printf("[%s] Key not found: %s", dht.node.Address, key)
 			return
 		}
 
-		log.Printf("[%s] DHT response sent", dht.node.Address)
-	case REQUEST_STORE:
-		if payload, ok := request.Payload.(map[string]string); ok {
-			key := payload["key"]
-			value := payload["value"]
-
-			dht.mutex.Lock()
-			dht.dataStore[key] = value
-			dht.mutex.Unlock()
-
-			log.Printf("[%s] Stored key-value pair: %s -> %s",
-				dht.node.Address, key, value)
+		response := DHTResponse{
+			DataStore: map[string]string{
+				key: value,
+			},
 		}
-	case REQUEST_GET:
-		if payload, ok := request.Payload.(map[string]string); ok {
-			key := payload["key"]
 
-			dht.mutex.RLock()
-			value, exists := dht.dataStore[key]
-			dht.mutex.RUnlock()
-
-			if !exists {
-				log.Printf("[%s] Key not found: %s", dht.node.Address, key)
-				return
-			}
-
-			response := DHTResponse{
-				DataStore: map[string]string{
-					key: value,
-				},
-			}
-
-			if err := json.NewEncoder(conn).Encode(response); err != nil {
-				log.Printf("[%s] Error sending GET response: %v", dht.node.Address, err)
-				return
-			}
-
-			log.Printf("[%s] GET response sent", dht.node.Address)
+		if err := json.NewEncoder(conn).Encode(response); err != nil {
+			log.Printf("[%s] Error sending GET response: %v", dht.node.Address, err)
+			return
 		}
+
+		log.Printf("[%s] GET response sent", dht.node.Address)
+	}
+}
+
+// handlePing responds to a PING request with a PONG
+func (dht *DHTNode) handlePing(conn net.Conn) {
+	request := DHTRequest{
+		Type: REQUEST_PONG,
+	}
+
+	if err := json.NewEncoder(conn).Encode(request); err != nil {
+		log.Printf("[%s] Error sending PONG response: %v", dht.node.Address, err)
+		return
 	}
 }
 
 // loadPeersFromConfig loads a list of peers from a configuration file
-func (dht *DHTNode) loadPeersFromConfig() error {
-	configPath := ".config/peers.txt"
-	log.Printf("[%s] Loading peers from %s", dht.node.Address, configPath)
-
-	file, err := os.Open(configPath)
-	if err != nil {
-		return fmt.Errorf("failed to open config file: %v", err)
-	}
-	defer file.Close()
-
-	uniquePeers := make(map[string]Node)
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		log.Printf("[%s] Processing peer: %s", dht.node.Address, line)
-
-		// Skip if this is our own address
-		if line == dht.node.Address {
-			log.Printf("[%s] Skipping self address", dht.node.Address)
-			continue
-		}
-
-		// Create node ID using address
-		id := sha3.Sum256([]byte(line))
-		node := Node{
-			ID:      id[:],
-			Address: line,
-		}
-
-		log.Printf("[%s] Created node with ID %x for address %s",
-			dht.node.Address, node.ID, node.Address)
-
-		uniquePeers[line] = node
-	}
-
-	log.Printf("[%s] Found %d unique peers", dht.node.Address, len(uniquePeers))
+func (dht *DHTNode) loadPeersFromConfig(peers map[string]Node) error {
 
 	// Now add unique peers to routing table
-	for _, node := range uniquePeers {
+	for _, node := range peers {
 		log.Printf("[%s] Adding peer %s to routing table", dht.node.Address, node.Address)
 		dht.addToKBucket(node)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error reading config file: %v", err)
 	}
 
 	return nil

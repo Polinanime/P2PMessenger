@@ -4,6 +4,8 @@ const (
 	REQUEST_GET_DHT = "GET_DHT"
 	REQUEST_STORE   = "STORE"
 	REQUEST_GET     = "GET"
+	REQUEST_PING    = "PING"
+	REQUEST_PONG    = "PONG"
 )
 
 const (
