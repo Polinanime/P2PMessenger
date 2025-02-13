@@ -101,6 +101,17 @@ func startMessenger(cmd *cobra.Command, args []string) {
 		case "users":
 			fmt.Println("\nRegistered Users:")
 			messenger.PrintUsers()
+		case "add":
+			if len(args) < 2 {
+				fmt.Println("\nUsage: add <address>")
+				continue
+			}
+			address := args[1]
+			if err := messenger.AddPeer(address); err != nil {
+				fmt.Printf("\nError adding user: %v\n", err)
+			} else {
+				fmt.Printf("\nUser added: %s\n", address)
+			}
 		case "exit":
 			fmt.Println("\nExiting...")
 			return
@@ -163,6 +174,7 @@ func printHelp() {
 	fmt.Println("  scan                    Scan for peers in the network")
 	fmt.Println("  whoami                  Print the user data")
 	fmt.Println("  users                   Print all registered users")
+	fmt.Println("  add <address>           Add user manually to DHT")
 	fmt.Println("\nExample:")
 	fmt.Println("  > send Eve Hello, how are you?")
 	fmt.Println("  > history Eve")

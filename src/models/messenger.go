@@ -258,6 +258,11 @@ func (p *P2PMessenger) handleDHTRequest(request DHTRequest, conn net.Conn) error
 	return fmt.Errorf("unknown request type: %s", request.Type)
 }
 
+// AddPeer adds a new peer to the DHT
+func (p *P2PMessenger) AddPeer(address string) error {
+	return p.dht.AddPeer(address)
+}
+
 func (p *P2PMessenger) handleMessage(message Message) {
 
 	// Check if we know the sender
