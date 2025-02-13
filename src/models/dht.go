@@ -70,6 +70,12 @@ func (dht *DHTNode) getBucketIndex(nodeId []byte) int {
 
 // addToKBucket adds a node to the appropriate k-bucket
 func (dht *DHTNode) addToKBucket(node Node) {
+	// Check for empty ID
+	if len(node.ID) == 0 {
+		log.Printf("Warning: Attempted to add node with empty ID: %s", node.Address)
+		return
+	}
+
 	if bytes.Equal(node.ID, dht.node.ID) {
 		return
 	}
@@ -640,6 +646,35 @@ func (dht *DHTNode) Get(key string) (string, bool) {
 	}
 
 	return "", false
+}
+
+// AddPeer adds a new peer to the DHT
+func (dht *DHTNode) AddPeer(address string) error {
+	// Check if the peer is already in the k-buckets
+	if dht.hasNode(address) {
+		return fmt.Errorf("peer %s already exists", address)
+	}
+
+	id := sha3.Sum256([]byte(address))
+
+	// Connect to the peer
+	node := Node{
+		ID:      id[:],
+		Address: address,
+	}
+	if err := dht.connectToPeer(node); err != nil {
+		return err
+	}
+
+	// Add the peer to the k-buckets
+	dht.addNode(node)
+
+	// Save the updated peers to the configuration file
+	if err := dht.savePeersToConfig(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // RegisterUser registers a user in the DHT

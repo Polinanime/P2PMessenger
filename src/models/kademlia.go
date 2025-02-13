@@ -27,11 +27,22 @@ func Distance(a, b []byte) []byte {
 
 // CommonPrefixLength returns the length of the common prefix of two byte slices.
 func CommonPrefixLength(a, b []byte) int {
-	for i := 0; i < len(a); i++ {
+	// Check length first
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+
+	minLen := len(a)
+	if len(b) < minLen {
+		minLen = len(b)
+	}
+
+	// Then compare byte by byte
+	for i := 0; i < minLen; i++ {
 		xor := a[i] ^ b[i]
 		if xor != 0 {
 			return i*8 + bits.LeadingZeros8(xor)
 		}
 	}
-	return len(a) * 8
+	return minLen * 8
 }
