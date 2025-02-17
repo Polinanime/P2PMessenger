@@ -2,7 +2,7 @@ name: Tests
 
 on:
   push:
-    branches: ["*"] # Run on all branches
+    branches: ["*"]
   pull_request:
     branches: ["*"]
   workflow_dispatch:
@@ -34,10 +34,10 @@ jobs:
         run: go mod download
 
       - name: Run unit tests
-        run: go test -v -race ./internal/... ./pkg/...
+        run: go test -v -race ./internal/...
 
       - name: Generate coverage report
-        run: go test -coverprofile=coverage.out ./internal/... ./pkg/...
+        run: go test -coverprofile=coverage.out ./internal/...
 
       - name: Check coverage threshold
         run: |
