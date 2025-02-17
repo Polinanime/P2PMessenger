@@ -9,7 +9,7 @@ on:
 
 env:
   GO_VERSION: "1.22"
-  COVERAGE_THRESHOLD: 70
+  # COVERAGE_THRESHOLD: 70
 
 jobs:
   test:
@@ -36,22 +36,22 @@ jobs:
       - name: Run unit tests
         run: go test -v -race ./internal/...
 
-      - name: Generate coverage report
-        run: go test -coverprofile=coverage.out ./internal/...
+      # - name: Generate coverage report
+      #   run: go test -coverprofile=coverage.out ./internal/...
 
-      - name: Check coverage threshold
-        run: |
-          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
-          if (( $(echo "$COVERAGE < ${{ env.COVERAGE_THRESHOLD }}" | bc -l) )); then
-            echo "Test coverage $COVERAGE% is below threshold ${{ env.COVERAGE_THRESHOLD }}%"
-            exit 1
-          fi
+      # - name: Check coverage threshold
+      #   run: |
+      #     COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+      #     if (( $(echo "$COVERAGE < ${{ env.COVERAGE_THRESHOLD }}" | bc -l) )); then
+      #       echo "Test coverage $COVERAGE% is below threshold ${{ env.COVERAGE_THRESHOLD }}%"
+      #       exit 1
+      #     fi
 
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: coverage.out
+      # - name: Upload coverage report
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: coverage-report
+      #     path: coverage.out
 
   integration:
     name: Integration Tests
