@@ -2,7 +2,6 @@ package models
 
 import (
 	"bytes"
-	"math/bits"
 
 	"github.com/polinanime/p2pmessenger/internal/types"
 )
@@ -25,9 +24,8 @@ func Distance(a, b []byte) []byte {
 	return distance
 }
 
-// CommonPrefixLength returns the length of the common prefix of two byte slices.
+// CommonPrefixLength returns the length of the common prefix of two byte slices
 func CommonPrefixLength(a, b []byte) int {
-	// Check length first
 	if len(a) == 0 || len(b) == 0 {
 		return 0
 	}
@@ -37,12 +35,21 @@ func CommonPrefixLength(a, b []byte) int {
 		minLen = len(b)
 	}
 
-	// Then compare byte by byte
+	// Compare byte by byte
 	for i := 0; i < minLen; i++ {
 		xor := a[i] ^ b[i]
-		if xor != 0 {
-			return i*8 + bits.LeadingZeros8(xor)
+		if xor == 0 {
+			continue
 		}
+		// Count leading zeros in the XOR result
+		zeros := 0
+		for j := uint(7); j >= 0; j-- {
+			if xor&(1<<j) != 0 {
+				break
+			}
+			zeros++
+		}
+		return i*8 + zeros
 	}
 	return minLen * 8
 }

@@ -57,7 +57,10 @@ func NewDHTNode(settings utils.Settings) *DHTNode {
 	if err != nil {
 		log.Println("Warning: failed to load peers from configuration file")
 	} else {
-		dht.loadPeersFromConfig(peers)
+		err = dht.loadPeersFromConfig(peers)
+		if err != nil {
+			log.Println("Error loading peers from configuration file:", err)
+		}
 	}
 
 	return dht
