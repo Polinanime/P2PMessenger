@@ -1,3 +1,5 @@
 #!/bin/sh
 
-./messenger start "$USER_ID" "$PORT"
+set -e
+
+exec p2pmessenger start "$USER_ID" "$PORT"

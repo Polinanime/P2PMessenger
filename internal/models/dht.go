@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	. "github.com/polinanime/p2pmessenger/types"
-	"github.com/polinanime/p2pmessenger/utils"
+	. "github.com/polinanime/p2pmessenger/internal/types"
+	"github.com/polinanime/p2pmessenger/internal/utils"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -57,7 +57,10 @@ func NewDHTNode(settings utils.Settings) *DHTNode {
 	if err != nil {
 		log.Println("Warning: failed to load peers from configuration file")
 	} else {
-		dht.loadPeersFromConfig(peers)
+		err = dht.loadPeersFromConfig(peers)
+		if err != nil {
+			log.Println("Error loading peers from configuration file:", err)
+		}
 	}
 
 	return dht
@@ -294,7 +297,7 @@ func (dht *DHTNode) addNode(node Node) {
 }
 
 // hasNode checks if a node is already in the k-buckets
-func (dht *DHTNode) hasNode(address string) bool {
+func (dht *DHTNode) HasNode(address string) bool {
 	dht.mutex.RLock()
 	defer dht.mutex.RUnlock()
 
@@ -473,6 +476,9 @@ func (dht *DHTNode) handlePing(conn net.Conn) error {
 
 // loadPeersFromConfig loads a list of peers from a configuration file
 func (dht *DHTNode) loadPeersFromConfig(peers map[string]Node) error {
+	if peers == nil || len(peers) == 0 {
+		return nil
+	}
 
 	// Now add unique peers to routing table
 	for _, node := range peers {
@@ -648,30 +654,32 @@ func (dht *DHTNode) Get(key string) (string, bool) {
 	return "", false
 }
 
-// AddPeer adds a new peer to the DHT
+// AddPeer adds a peer to the DHT
 func (dht *DHTNode) AddPeer(address string) error {
 	// Check if the peer is already in the k-buckets
-	if dht.hasNode(address) {
+	if dht.HasNode(address) {
 		return fmt.Errorf("peer %s already exists", address)
 	}
 
 	id := sha3.Sum256([]byte(address))
 
-	// Connect to the peer
+	// Create the node
 	node := Node{
 		ID:      id[:],
 		Address: address,
-	}
-	if err := dht.connectToPeer(node); err != nil {
-		return err
 	}
 
 	// Add the peer to the k-buckets
 	dht.addNode(node)
 
+	// Try to connect to the peer (but don't fail if we can't)
+	if err := dht.connectToPeer(node); err != nil {
+		log.Printf("Warning: Could not connect to peer %s: %v", address, err)
+	}
+
 	// Save the updated peers to the configuration file
 	if err := dht.savePeersToConfig(); err != nil {
-		return err
+		log.Printf("Warning: Could not save peers to config: %v", err)
 	}
 
 	return nil
