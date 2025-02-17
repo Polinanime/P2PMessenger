@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/polinanime/p2pmessenger/models"
-	"github.com/polinanime/p2pmessenger/utils"
+	"github.com/polinanime/p2pmessenger/internal/models"
+	"github.com/polinanime/p2pmessenger/internal/utils"
 	"github.com/spf13/cobra"
 )
 

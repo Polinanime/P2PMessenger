@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/polinanime/p2pmessenger/utils"
+	"github.com/polinanime/p2pmessenger/internal/utils"
 )
 
 type Message struct {

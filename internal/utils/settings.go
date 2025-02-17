@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/polinanime/p2pmessenger/types"
+	"github.com/polinanime/p2pmessenger/internal/types"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -40,8 +40,23 @@ func (s *Settings) ReadPeers(ignoreAddress string) (map[string]types.Node, error
 
 	file, err := os.Open(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open config file: %v", err)
+
+		// Create config directory if it doesn't exist
+		err = os.MkdirAll(".config", 0755)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create config directory: %v", err)
+		}
+
+		// Create empty config file if it doesn't exist
+		file, err = os.Create(configPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create config file: %v", err)
+		}
+		defer file.Close()
+
+		return nil, nil
 	}
+
 	defer file.Close()
 
 	uniquePeers := make(map[string]types.Node)

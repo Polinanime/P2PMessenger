@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"math/bits"
 
-	"github.com/polinanime/p2pmessenger/types"
+	"github.com/polinanime/p2pmessenger/internal/types"
 )
 
 type KBucket struct {

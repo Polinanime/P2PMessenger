@@ -1,70 +1,46 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/compose-spec/compose-spec/master/schema/compose-spec.json
-
 version: "3.8"
 
 services:
   messenger1:
-    build: .
+    build:
+      context: .
+      dockerfile: build/docker/Dockerfile
     container_name: messenger1
-    stdin_open: true
-    tty: true
-    networks:
-      network1:
-        ipv4_address: 172.20.0.2
-    ports:
-      - "1235:1235"
     environment:
       - USER_ID=Adam
       - PORT=1235
-    volumes:
-      - ./src/.config:/app/.config
+    networks:
+      messenger_net:
+        ipv4_address: 172.20.0.2
 
   messenger2:
-    build: .
+    build:
+      context: .
+      dockerfile: build/docker/Dockerfile
     container_name: messenger2
-    stdin_open: true
-    tty: true
-    networks:
-      network2:
-        ipv4_address: 172.21.0.2
-    ports:
-      - "1236:1236"
     environment:
       - USER_ID=Eve
       - PORT=1236
-    volumes:
-      - ./src/.config:/app/.config
+    networks:
+      messenger_net:
+        ipv4_address: 172.20.0.3
 
   messenger3:
-    build: .
+    build:
+      context: .
+      dockerfile: build/docker/Dockerfile
     container_name: messenger3
-    stdin_open: true
-    tty: true
-    networks:
-      network2:
-        ipv4_address: 172.21.0.3
-    ports:
-      - "1237:1237"
     environment:
       - USER_ID=Bob
       - PORT=1237
-    volumes:
-      - ./src/.config:/app/.config
+    networks:
+      messenger_net:
+        ipv4_address: 172.20.0.4
 
 networks:
-  network1:
-    name: network1
+  messenger_net:
     driver: bridge
     ipam:
-      driver: default
       config:
         - subnet: 172.20.0.0/16
-          gateway: 172.20.0.1
-  network2:
-    name: network2
-    driver: bridge
-    ipam:
-      driver: default
-      config:
-        - subnet: 172.21.0.0/16
-          gateway: 172.21.0.1
