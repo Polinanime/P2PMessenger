@@ -1,46 +1,32 @@
 package integration
 
 import (
+	"log"
 	"testing"
 	"time"
 
-	"github.com/polinanime/p2pmessenger/internal/models"
-	"github.com/polinanime/p2pmessenger/internal/utils"
+	"github.com/polinanime/p2pmessenger/internal/testutils"
 )
 
 func TestMessengerEndToEnd(t *testing.T) {
-	// Create two messengers
-	settings1 := utils.Settings{
-		Username: "user1",
-		Port:     "8081",
-	}
-	settings2 := utils.Settings{
-		Username: "user2",
-		Port:     "8082",
-	}
-
-	messenger1 := models.NewP2PMessenger(settings1)
-	messenger2 := models.NewP2PMessenger(settings2)
-
+	messenger1, messenger2 := testutils.CreateMessengers(t)
 	defer messenger1.Close()
 	defer messenger2.Close()
 
-	// Start both messengers
-	if err := messenger1.Start(); err != nil {
-		t.Fatalf("Failed to start messenger1: %v", err)
-	}
-	if err := messenger2.Start(); err != nil {
-		t.Fatalf("Failed to start messenger2: %v", err)
-	}
+	log.Printf("Eve's address: %s", messenger1.GetAddress())
+	log.Printf("Adam's address: %s", messenger2.GetAddress())
 
-	// Add peers
-	if err := messenger1.AddPeer(messenger2.GetAddress()); err != nil {
-		t.Fatalf("Failed to add peer: %v", err)
+	// Verify peers are connected
+	if !messenger1.GetDHT().HasNode(messenger2.GetAddress()) {
+		t.Fatal("Messenger1 does not have Messenger2 in its DHT")
+	}
+	if !messenger2.GetDHT().HasNode(messenger1.GetAddress()) {
+		t.Fatal("Messenger2 does not have Messenger1 in its DHT")
 	}
 
 	// Send test message
 	testMessage := "Hello, this is a test message"
-	if err := messenger1.SendMessage("user2", testMessage); err != nil {
+	if err := messenger1.SendMessage("Adam", testMessage); err != nil {
 		t.Fatalf("Failed to send message: %v", err)
 	}
 
@@ -51,7 +37,9 @@ func TestMessengerEndToEnd(t *testing.T) {
 	messages := messenger2.GetHistory()
 	found := false
 	for _, msg := range messages {
-		if msg.From == "user1" && msg.Content == testMessage {
+		log.Printf("Message in history: From=%s, To=%s, Content=%s",
+			msg.From, msg.To, msg.Content)
+		if msg.From == "Eve" && msg.Content == testMessage {
 			found = true
 			break
 		}
