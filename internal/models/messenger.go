@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/polinanime/p2pmessenger/internal/mocks"
 	"github.com/polinanime/p2pmessenger/internal/utils"
 )
 
@@ -28,8 +29,11 @@ type P2PMessenger struct {
 	Ready    chan bool
 	KeyPair  *KeyPair
 	history  *MessageHistory
+	testConn net.Conn
+	testMode bool
 }
 
+// NewP2PMessenger creates a new P2PMessenger instance.
 func NewP2PMessenger(settings utils.Settings) *P2PMessenger {
 	address := fmt.Sprintf("0.0.0.0:%s", settings.Port)
 	listener, err := net.Listen("tcp", address)
@@ -41,7 +45,7 @@ func NewP2PMessenger(settings utils.Settings) *P2PMessenger {
 		panic(err)
 	}
 
-	containerIP := getContainerIP()
+	containerIP := GetContainerIP()
 	dhtAddress := fmt.Sprintf("%s:%s", containerIP, settings.Port)
 	settings.Address = dhtAddress // Update settings with DHT address
 
@@ -56,6 +60,35 @@ func NewP2PMessenger(settings utils.Settings) *P2PMessenger {
 	}
 }
 
+// NewMockMessenger creates a new P2PMessenger instance.
+func NewMockMessenger(settings utils.Settings, conn net.Conn) *P2PMessenger {
+	keyPair, err := GenerateKeyPair(2048)
+	if err != nil {
+		panic(err)
+	}
+
+	containerIP := GetContainerIP()
+	dhtAddress := fmt.Sprintf("%s:%s", containerIP, settings.Port)
+	settings.Address = dhtAddress
+
+	listener := &mocks.MockListener{
+		Conn: conn,
+	}
+
+	return &P2PMessenger{
+		dht:      NewDHTNode(settings),
+		userID:   settings.Username,
+		port:     settings.Port,
+		listener: listener,
+		Ready:    make(chan bool),
+		KeyPair:  keyPair,
+		history:  NewMessageHistory(),
+		testConn: conn,
+		testMode: true,
+	}
+}
+
+// Start starts the P2PMessenger instance.
 func (p *P2PMessenger) Start() error {
 	if p.listener == nil {
 		return fmt.Errorf("listener not initialized")
@@ -67,7 +100,7 @@ func (p *P2PMessenger) Start() error {
 		return fmt.Errorf("failed to export public key: %v", err)
 	}
 
-	containerIP := getContainerIP()
+	containerIP := GetContainerIP()
 	address := fmt.Sprintf("%s:%s", containerIP, p.port)
 
 	log.Printf("[%s] Registering with address: %s", p.userID, address)
@@ -102,6 +135,7 @@ func (p *P2PMessenger) Start() error {
 	return nil
 }
 
+// PrintUsers prints the list of registered users
 func (p *P2PMessenger) PrintUsers() {
 	p.dht.mutex.RLock()
 	defer p.dht.mutex.RUnlock()
@@ -120,14 +154,17 @@ func (p *P2PMessenger) PrintUsers() {
 	}
 }
 
+// ScanPeers scans the network for peers
 func (p *P2PMessenger) ScanPeers() error {
 	return p.dht.Bootstrap()
 }
 
+// GetAddress returns the address of the P2PMessenger instance
 func (p *P2PMessenger) GetAddress() string {
-	return p.listener.Addr().String()
+	return GetContainerIP() + ":" + p.port
 }
 
+// SendMessage sends encrypted message to a user
 func (p *P2PMessenger) SendMessage(to, content string) error {
 	if to == p.userID {
 		return fmt.Errorf("cannot send message to myself")
@@ -162,18 +199,22 @@ func (p *P2PMessenger) SendMessage(to, content string) error {
 
 	log.Printf("[%s] Sending message to %s at %s", p.userID, to, userInfo["address"])
 
-	conn, err := net.Dial("tcp", address)
-	if err != nil {
-		return fmt.Errorf("connection failed: %v", err)
+	var conn net.Conn
+	if p.testMode {
+		conn = p.testConn
+	} else {
+		conn, err = net.Dial("tcp", address)
+		if err != nil {
+			return fmt.Errorf("connection failed: %v", err)
+		}
+		defer conn.Close()
 	}
-	defer conn.Close()
-
 	message := Message{
 		From:             p.userID,
 		To:               to,
 		EncryptedContent: encryptedContent,
 		PublicKey:        publicKeyPEM,
-		FromAddress:      getContainerIP() + ":" + p.port,
+		FromAddress:      GetContainerIP() + ":" + p.port,
 	}
 
 	// Debug logging
@@ -306,25 +347,35 @@ func (p *P2PMessenger) handleMessage(message Message) {
 		message.From, message.To, string(decryptedContent))
 }
 
+// Close closes the P2PMessenger instance.
 func (p *P2PMessenger) Close() {
 	p.listener.Close()
 }
 
+// PrintDht prints the DHTNode instance associated with the P2PMessenger.
 func (p *P2PMessenger) PrintDht() {
 	p.dht.Print()
 }
 
+// GetUserID returns the user ID of the P2PMessenger.
 func (p *P2PMessenger) GetUserID() string {
 	return p.userID
 }
 
+// GetHistory returns the chat history of the P2PMessenger.
 func (p *P2PMessenger) GetHistory() []ChatMessage {
 	p.history.mutex.RLock()
 	defer p.history.mutex.RUnlock()
 	return p.history.GetMessages()
 }
 
-func getContainerIP() string {
+// GetDHT returns the DHTNode instance associated with the P2PMessenger.
+func (p *P2PMessenger) GetDHT() *DHTNode {
+	return p.dht
+}
+
+// GetContainerIP returns the IP of the container
+func GetContainerIP() string {
 	// Default to Docker network IP if available
 	ifaces, err := net.Interfaces()
 	if err != nil {

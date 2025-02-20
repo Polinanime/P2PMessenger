@@ -160,7 +160,7 @@ func scanPeers(messenger *models.P2PMessenger) {
 func printWhoAmI(messenger *models.P2PMessenger) {
 	userID := messenger.GetUserID()
 	fmt.Printf("User ID: %s\n", userID)
-	fmt.Printf("Address: %s\n", messenger.GetAddress())
+	fmt.Printf("Address: %s\n", models.GetContainerIP())
 }
 
 func printHelp() {

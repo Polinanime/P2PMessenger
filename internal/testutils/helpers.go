@@ -2,10 +2,12 @@ package testutils
 
 import (
 	"crypto/sha3"
-	"net"
 	"testing"
+	"time"
 
+	"github.com/polinanime/p2pmessenger/internal/models"
 	"github.com/polinanime/p2pmessenger/internal/types"
+	"github.com/polinanime/p2pmessenger/internal/utils"
 )
 
 // CreateTestNodeWithAddress creates a node with a specific address for testing
@@ -37,8 +39,41 @@ func CreateTestNetwork(t *testing.T, size int) []types.Node {
 	return nodes
 }
 
-// MockConnection creates a mock network connection for testing
-func MockConnection() (net.Conn, net.Conn) {
-	conn1, conn2 := net.Pipe()
-	return conn1, conn2
+// SetupMessengers creates two messengers for testing
+func CreateMessengers(t *testing.T) (*models.P2PMessenger, *models.P2PMessenger) {
+	settings1 := utils.Settings{
+		Username: "Eve",
+		Port:     "8081",
+	}
+	settings2 := utils.Settings{
+		Username: "Adam",
+		Port:     "8082",
+	}
+
+	messenger1 := models.NewP2PMessenger(settings1)
+	messenger2 := models.NewP2PMessenger(settings2)
+
+	// Start both messengers
+	if err := messenger1.Start(); err != nil {
+		t.Fatalf("Failed to start messenger1: %v", err)
+	}
+	if err := messenger2.Start(); err != nil {
+		t.Fatalf("Failed to start messenger2: %v", err)
+	}
+
+	// Wait for startup
+	time.Sleep(time.Second)
+
+	// Connect peers
+	if err := messenger1.AddPeer(messenger2.GetAddress()); err != nil {
+		t.Fatalf("Failed to add peer1: %v", err)
+	}
+	if err := messenger2.AddPeer(messenger1.GetAddress()); err != nil {
+		t.Fatalf("Failed to add peer2: %v", err)
+	}
+
+	// Wait for connections
+	time.Sleep(time.Second)
+
+	return messenger1, messenger2
 }
